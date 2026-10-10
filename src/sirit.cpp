@@ -21,8 +21,8 @@ Module::Module(u32 version_)
     : version{version_}, ext_inst_imports{std::make_unique<Stream>(&bound)},
       entry_points{std::make_unique<Stream>(&bound)},
       execution_modes{std::make_unique<Stream>(&bound)}, debug{std::make_unique<Stream>(&bound)},
-      annotations{std::make_unique<Stream>(&bound)}, declarations{std::make_unique<Declarations>(
-                                                         &bound)},
+      debug_name{std::make_unique<Stream>(&bound)}, annotations{std::make_unique<Stream>(&bound)},
+      declarations{std::make_unique<Declarations>(&bound)},
       global_variables{std::make_unique<Stream>(&bound)}, code{std::make_unique<Stream>(&bound)} {}
 
 Module::~Module() = default;
@@ -60,6 +60,7 @@ std::vector<u32> Module::Assemble() const {
     insert(entry_points->Words());
     insert(execution_modes->Words());
     insert(debug->Words());
+    insert(debug_name->Words());
     insert(annotations->Words());
     insert(declarations->Words());
     insert(global_variables->Words());
@@ -68,7 +69,7 @@ std::vector<u32> Module::Assemble() const {
     return words;
 }
 
-void Module::PatchDeferredPhi(const std::function<Id(std::size_t index)>& func) {
+void Module::PatchDeferredPhi(const std::function<std::pair<Id, Id>(std::size_t arg, Id parent)>& func) {
     for (const u32 phi_index : deferred_phi_nodes) {
         const u32 first_word = code->Value(phi_index);
         [[maybe_unused]] const spv::Op op = static_cast<spv::Op>(first_word & 0xffff);
@@ -77,7 +78,10 @@ void Module::PatchDeferredPhi(const std::function<Id(std::size_t index)>& func) 
         const u32 num_args = (num_words - 3) / 2;
         u32 cursor = phi_index + 3;
         for (u32 arg = 0; arg < num_args; ++arg, cursor += 2) {
-            code->SetValue(cursor, func(arg).value);
+            const Id current_parent{code->Value(cursor + 1)};
+            const auto [variable, parent] = func(arg, current_parent);
+            code->SetValue(cursor, variable.value);
+            code->SetValue(cursor + 1, parent.value);
         }
     }
 }
@@ -131,12 +135,55 @@ Id Module::AddGlobalVariable(Id result_type, spv::StorageClass storage_class,
 }
 
 Id Module::GetGLSLstd450() {
+    const char* extname = "GLSL.std.450";
+    size_t len = WordsInString(extname);
     if (!glsl_std_450) {
-        ext_inst_imports->Reserve(3 + 4);
-        glsl_std_450 = *ext_inst_imports << OpId{spv::Op::OpExtInstImport} << "GLSL.std.450"
-                                         << EndOp{};
+        ext_inst_imports->Reserve(3 + len);
+        glsl_std_450 = *ext_inst_imports << OpId{spv::Op::OpExtInstImport} << extname << EndOp{};
     }
     return *glsl_std_450;
+}
+
+Id Module::GetNonSemanticDebugPrintf() {
+    const char* extname = "NonSemantic.DebugPrintf";
+    size_t len = WordsInString(extname);
+    if (!non_semantic_debug_printf) {
+        ext_inst_imports->Reserve(3 + len);
+        non_semantic_debug_printf = *ext_inst_imports << OpId{spv::Op::OpExtInstImport} << extname
+                                                      << EndOp{};
+    }
+    return *non_semantic_debug_printf;
+}
+
+Id Module::GetAmdGcnShader() {
+    const char* extname = "SPV_AMD_gcn_shader";
+    size_t len = WordsInString(extname);
+    if (!amd_gcn_shader) {
+        ext_inst_imports->Reserve(3 + len);
+        amd_gcn_shader = *ext_inst_imports << OpId{spv::Op::OpExtInstImport} << extname << EndOp{};
+    }
+    return *amd_gcn_shader;
+}
+
+Id Module::GetAmdShaderTrinaryMinMax() {
+    const char* extname = "SPV_AMD_shader_trinary_minmax";
+    size_t len = WordsInString(extname);
+    if (!amd_shader_trinary_minmax) {
+        ext_inst_imports->Reserve(3 + len);
+        amd_shader_trinary_minmax = *ext_inst_imports << OpId{spv::Op::OpExtInstImport} << extname << EndOp{};
+    }
+    return *amd_shader_trinary_minmax;
+}
+
+
+Id Module::GetAmdExplicitVertexParameter() {
+    const char* extname = "SPV_AMD_shader_explicit_vertex_parameter";
+    size_t len = WordsInString(extname);
+    if (!amd_explicit_vertex_parameter) {
+        ext_inst_imports->Reserve(3 + len);
+        amd_explicit_vertex_parameter = *ext_inst_imports << OpId{spv::Op::OpExtInstImport} << extname << EndOp{};
+    }
+    return *amd_explicit_vertex_parameter;
 }
 
 } // namespace Sirit

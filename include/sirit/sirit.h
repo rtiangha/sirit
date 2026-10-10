@@ -32,6 +32,8 @@ class Stream;
 using Literal =
     std::variant<std::uint32_t, std::uint64_t, std::int32_t, std::int64_t, float, double>;
 
+using MemoryAccessLiteral = std::variant<spv::MemoryAccessMask, std::uint32_t>;
+
 struct Id {
     std::uint32_t value;
 };
@@ -54,7 +56,7 @@ public:
     std::vector<std::uint32_t> Assemble() const;
 
     /// Patches deferred phi nodes calling the passed function on each phi argument
-    void PatchDeferredPhi(const std::function<Id(std::size_t index)>& func);
+    void PatchDeferredPhi(const std::function<std::pair<Id, Id>(std::size_t arg, Id parent)>& func);
 
     /// Adds a SPIR-V extension.
     void AddExtension(std::string extension_name);
@@ -75,7 +77,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) void AddEntryPoint(
         spv::ExecutionModel execution_model, Id entry_point, std::string_view name,
-        Ts&&... interfaces) {
+                       Ts&&... interfaces) {
         AddEntryPoint(execution_model, std::move(entry_point), name,
                       std::span<const Id>({interfaces...}));
     }
@@ -261,7 +263,7 @@ public:
         OpPhi(Id result_type, Ts&&... operands) {
         return OpPhi(result_type, std::span<const Id>({operands...}));
     }
-    
+
     /**
      * The SSA phi function. This instruction will be revisited when patching phi nodes.
      *
@@ -278,7 +280,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpLoopMerge(Id merge_block, Id continue_target, spv::LoopControlMask loop_control,
-                    Ts&&... literals) {
+                   Ts&&... literals) {
         return OpLoopMerge(merge_block, continue_target, loop_control,
                            std::span<const Id>({literals...}));
     }
@@ -349,11 +351,25 @@ public:
 
     /// Load through a pointer.
     Id OpLoad(Id result_type, Id pointer,
-              std::optional<spv::MemoryAccessMask> memory_access = std::nullopt);
+        std::span<const MemoryAccessLiteral> memory_access = {});
+
+    /// Load through a pointer.
+    template <typename... Ts>
+    requires(...&& std::is_convertible_v<Ts, MemoryAccessLiteral>) Id
+        OpLoad(Id result_type, Id pointer, Ts&&... memory_access) {
+        return OpLoad(result_type, pointer, std::span<const MemoryAccessLiteral>({memory_access...}));
+    }
 
     /// Store through a pointer.
     Id OpStore(Id pointer, Id object,
-               std::optional<spv::MemoryAccessMask> memory_access = std::nullopt);
+               std::span<const MemoryAccessLiteral> memory_access = {});
+
+    /// Store through a pointer.
+    template <typename... Ts>
+    requires(...&& std::is_convertible_v<Ts, MemoryAccessLiteral>) Id
+        OpStore(Id pointer, Id object, Ts&&... memory_access) {
+        return OpStore(pointer, object, std::span<const MemoryAccessLiteral>({memory_access...}));
+    }
 
     /// Create a pointer into a composite object that can be used with OpLoad and OpStore.
     Id OpAccessChain(Id result_type, Id base, std::span<const Id> indexes = {});
@@ -441,7 +457,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Literal>) Id
         MemberDecorate(Id structure_type, Literal member, spv::Decoration decoration,
-                       Ts&&... literals) {
+                      Ts&&... literals) {
         const Literal stack_literals[] = {std::forward<Ts>(literals)...};
         return MemberDecorate(structure_type, member, decoration,
                               std::span<const Literal>{stack_literals});
@@ -464,6 +480,8 @@ public:
 
     /// Finish the current primitive and start a new one. No vertex is emitted.
     void OpEndStreamPrimitive(Id stream);
+
+    Id OpReadClockKHR(Id result_type, Id scope);
 
     // Barrier
 
@@ -593,6 +611,12 @@ public:
     /// Convert (value preserving) from unsigned integer to floating point.
     Id OpConvertUToF(Id result_type, Id operand);
 
+    /// Convert (value preserving) from unsigned integer to pointer.
+    Id OpConvertUToPtr(Id result_type, Id operand);
+
+    /// Convert (value preserving) from pointer to unsigned integer.
+    Id OpConvertPtrToU(Id result_type, Id operand);
+
     /// Convert (value preserving) unsigned width. This is either a truncate or a zero extend.
     Id OpUConvert(Id result_type, Id operand);
 
@@ -675,6 +699,12 @@ public:
 
     /// Floating-point multiplication of Operand 1 and Operand 2.
     Id OpFMul(Id result_type, Id operand_1, Id operand_2);
+
+    /// Full signed interger multiplication of Operand 1 and Operand 2.
+    Id OpSMulExtended(Id result_type, Id operand_1, Id operand_2);
+
+    /// Full unsigned interger multiplication of Operand 1 and Operand 2.
+    Id OpUMulExtended(Id result_type, Id operand_1, Id operand_2);
 
     /// Unsigned-integer division of Operand 1 divided by Operand 2.
     Id OpUDiv(Id result_type, Id operand_1, Id operand_2);
@@ -791,6 +821,9 @@ public:
     /// Result is the reciprocal of sqrt x. Result is undefined if x <= 0.
     Id OpInverseSqrt(Id result_type, Id x);
 
+    /// Result is a floating-point number from x and the corresponding integral exponent of two in exp.
+    Id OpLdexp(Id result_type, Id x, Id exp);
+
     /// Result is y if y < x; otherwise result is x. Which operand is the result is undefined if one
     /// of the operands is a NaN.
     Id OpFMin(Id result_type, Id x, Id y);
@@ -802,6 +835,10 @@ public:
     /// Result is y if y < x; otherwise result is x, where x and y are interpreted as signed
     /// integers.
     Id OpSMin(Id result_type, Id x, Id y);
+
+    /// Result is y if y < x, either x or y if both x and y are zeros, otherwise x. If one operand is a NaN, the other
+    /// operand is the result. If both operands are NaN, the result is a NaN.
+    Id OpNMin(Id result_type, Id x, Id y);
 
     /// Result is y if x < y; otherwise result is x. Which operand is the result is undefined if one
     /// of the operands is a NaN.
@@ -815,9 +852,17 @@ public:
     /// integers.
     Id OpSMax(Id result_type, Id x, Id y);
 
-    /// Result is min(max(x, minVal), maxVal). Result is undefined if minVal > maxVal.The semantics
-    /// used by min() and max() are those of FMin and FMax.
+    /// Result is y if x < y, either x or y if both x and y are zeros, otherwise x. If one operand is a NaN, the other
+    /// operand is the result. If both operands are NaN, the result is a NaN.
+    Id OpNMax(Id result_type, Id x, Id y);
+
+    /// Result is min(max(x, minVal), maxVal). Result is undefined if minVal > maxVal.
+    /// The semantics used by min() and max() are those of FMin and FMax.
     Id OpFClamp(Id result_type, Id x, Id min_val, Id max_val);
+
+    /// Result is min(max(x, minVal), maxVal). The resulting value is poison if minVal > maxVal.
+    /// The semantics used by min() and max() are those of NMin and NMax.
+    Id OpNClamp(Id result_type, Id x, Id min_val, Id max_val);
 
     /// Result is min(max(x, minVal), maxVal), where x, minVal and maxVal are interpreted as
     /// unsigned integers. Result is undefined if minVal > maxVal.
@@ -830,14 +875,54 @@ public:
     /// Computes a * b + c.
     Id OpFma(Id result_type, Id a, Id b, Id c);
 
+    /// Result is a structure containing x split into a floating-point significand in the range
+    /// (-1.0, 0.5] or [0.5, 1.0) and an integral exponent of 2, such that: x = significand * 2^exponent
+    Id OpFrexpStruct(Id result_type, Id x);
+
     /// Result is the unsigned integer obtained by converting the components of a two-component
     /// floating-point vector to the 16-bit OpTypeFloat, and then packing these two 16-bit integers
     /// into a 32-bit unsigned integer.
     Id OpPackHalf2x16(Id result_type, Id v);
 
     /// Result is the two-component floating-point vector with components obtained by unpacking a
-    /// 32-bit unsigned integer into a pair of 16-bit values.
+    /// 32-bit unsigned integer into a pair of floating-point 16-bit values.
     Id OpUnpackHalf2x16(Id result_type, Id v);
+
+    /// Result is the unsigned integer obtained by converting the components of a two-component
+    /// unsigned normalized floating-point vector to 16-bit integer values, and then packing these
+    /// two 16-bit integers into a 32-bit unsigned integer.
+    Id OpPackUnorm2x16(Id result_type, Id v);
+
+    /// Result is the two-component floating-point vector with components obtained by unpacking a
+    /// 32-bit unsigned integer into a pair of unsigned normalized 16-bit values.
+    Id OpUnpackUnorm2x16(Id result_type, Id v);
+
+    /// Result is the unsigned integer obtained by converting the components of a two-component
+    /// signed normalized floating-point vector to 16-bit integer values, and then packing these
+    /// two 16-bit integers into a 32-bit unsigned integer.
+    Id OpPackSnorm2x16(Id result_type, Id v);
+
+    /// Result is the two-component floating-point vector with components obtained by unpacking a
+    /// 32-bit unsigned integer into a pair of signed normalized 16-bit values.
+    Id OpUnpackSnorm2x16(Id result_type, Id v);
+
+    /// Result is the unsigned integer obtained by converting the components of a four-component
+    /// unsigned normalized floating-point vector to 8-bit integer values, and then packing these
+    /// four 8-bit integers into a 32-bit unsigned integer.
+    Id OpPackUnorm4x8(Id result_type, Id v);
+
+    /// Result is the four-component floating-point vector with components obtained by unpacking a
+    /// 32-bit unsigned integer into four unsigned normalized 8-bit values.
+    Id OpUnpackUnorm4x8(Id result_type, Id v);
+
+    /// Result is the unsigned integer obtained by converting the components of a four-component
+    /// signed normalized floating-point vector to 8-bit integer values, and then packing these
+    /// four 8-bit integers into a 32-bit unsigned integer.
+    Id OpPackSnorm4x8(Id result_type, Id v);
+
+    /// Result is the four-component floating-point vector with components obtained by unpacking a
+    /// 32-bit unsigned integer into four signed normalized 8-bit values.
+    Id OpUnpackSnorm4x8(Id result_type, Id v);
 
     /// Integer least-significant bit.
     Id OpFindILsb(Id result_type, Id value);
@@ -932,7 +1017,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleImplicitLod(Id result_type, Id sampled_image, Id coordinate,
-                                 spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleImplicitLod(result_type, sampled_image, coordinate, image_operands,
                                         std::span<const Id>({operands...}));
     }
@@ -946,7 +1031,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleExplicitLod(Id result_type, Id sampled_image, Id coordinate,
-                                 spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleExplicitLod(result_type, sampled_image, coordinate, image_operands,
                                         std::span<const Id>({operands...}));
     }
@@ -961,7 +1046,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleDrefImplicitLod(Id result_type, Id sampled_image, Id coordinate, Id dref,
-                                     spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                    spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleDrefImplicitLod(result_type, sampled_image, coordinate, dref,
                                             image_operands, std::span<const Id>({operands...}));
     }
@@ -975,7 +1060,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleDrefExplicitLod(Id result_type, Id sampled_image, Id coordinate, Id dref,
-                                     spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                    spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleDrefExplicitLod(result_type, sampled_image, coordinate, dref,
                                             image_operands, std::span<const Id>({operands...}));
     }
@@ -990,7 +1075,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleProjImplicitLod(Id result_type, Id sampled_image, Id coordinate,
-                                     spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                    spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleProjImplicitLod(result_type, sampled_image, coordinate, image_operands,
                                             std::span<const Id>({operands...}));
     }
@@ -1004,7 +1089,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleProjExplicitLod(Id result_type, Id sampled_image, Id coordinate,
-                                     spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                    spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleProjExplicitLod(result_type, sampled_image, coordinate, image_operands,
                                             std::span<const Id>({operands...}));
     }
@@ -1021,7 +1106,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleProjDrefImplicitLod(Id result_type, Id sampled_image, Id coordinate, Id dref,
-                                         spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                        spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleProjDrefImplicitLod(result_type, sampled_image, coordinate, dref,
                                                 image_operands, std::span<const Id>({operands...}));
     }
@@ -1037,7 +1122,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageSampleProjDrefExplicitLod(Id result_type, Id sampled_image, Id coordinate, Id dref,
-                                         spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                                        spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageSampleProjDrefExplicitLod(result_type, sampled_image, coordinate, dref,
                                                 image_operands, std::span<const Id>({operands...}));
     }
@@ -1051,7 +1136,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageFetch(Id result_type, Id sampled_image, Id coordinate,
-                     spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                    spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageFetch(result_type, sampled_image, coordinate, image_operands,
                             std::span<const Id>({operands...}));
     }
@@ -1065,7 +1150,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageGather(Id result_type, Id sampled_image, Id coordinate, Id component,
-                      spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                     spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageGather(result_type, sampled_image, coordinate, component, image_operands,
                              std::span<const Id>({operands...}));
     }
@@ -1079,7 +1164,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageDrefGather(Id result_type, Id sampled_image, Id coordinate, Id dref,
-                          spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                         spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageDrefGather(result_type, sampled_image, coordinate, dref, image_operands,
                                  std::span<const Id>({operands...}));
     }
@@ -1093,7 +1178,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageRead(Id result_type, Id sampled_image, Id coordinate,
-                    spv::ImageOperandsMask image_operands, Ts&&... operands) {
+                   spv::ImageOperandsMask image_operands, Ts&&... operands) {
         return OpImageRead(result_type, sampled_image, coordinate, image_operands,
                            std::span<const Id>({operands...}));
     }
@@ -1107,7 +1192,7 @@ public:
     template <typename... Ts>
     requires(...&& std::is_convertible_v<Ts, Id>) Id
         OpImageWrite(Id image, Id coordinate, Id texel, spv::ImageOperandsMask image_operands,
-                     Ts&&... operands) {
+                    Ts&&... operands) {
         return OpImageWrite(image, coordinate, texel, image_operands,
                             std::span<const Id>({operands...}));
     }
@@ -1195,24 +1280,35 @@ public:
     /// TBD
     Id OpSubgroupAllEqualKHR(Id result_type, Id predicate);
 
-    // Result is true only in the active invocation with the lowest id in the group, otherwise
-    // result is false.
-    Id OpGroupNonUniformElect(Id result_type, Id scope);
+    // Find the least significant bit set to 1 in Value, considering only the bits in Value required
+    // to represent all bits of the scope restricted tangle. If none of the considered bits is set to 1,
+    // the resulting value is undefined.
+    Id OpGroupNonUniformBallotFindLSB(Id result_type, Id scope, Id value);
 
-    // Result is the Value of the invocation from the active invocation with the lowest id in the
-    // group to all active invocations in the group.
-    Id OpGroupNonUniformBroadcastFirst(Id result_type, Id scope, Id value);
+    // An integer add group operation of all Value operands contributed by all tangled invocations
+    // within the Execution scope.
+    Id OpGroupNonUniformIAdd(Id result_type, Id scope, spv::GroupOperation group_operation, Id value);
+
+    Id OpGroupNonUniformUMin(Id result_type, Id scope, spv::GroupOperation group_operation, Id value);
 
     // Result is the Value of the invocation identified by the id Id to all active invocations in
     // the group.
     Id OpGroupNonUniformBroadcast(Id result_type, Id scope, Id value, Id id);
 
-    // Result is the Value of the invocation identified by the id Id.
-    Id OpGroupNonUniformShuffle(Id result_type, Id scope, Id value, Id id);
+    // Result is the Value of the invocation from the active invocation with the lowest id
+    // in the group to all active invocations in the group.
+    Id OpGroupNonUniformBroadcastFirst(Id result_type, Id scope, Id value);
+
+    /// Result is the Value of the invocation identified by the id invocation_id.
+    Id OpGroupNonUniformShuffle(Id result_type, Id scope, Id value, Id invocation_id);
 
     /// Return the value of the invocation identified by the current invocation's id within the
     /// group xor'ed with mask.
     Id OpGroupNonUniformShuffleXor(Id result_type, Id scope, Id value, Id mask);
+
+    /// Result is true only in the tangled invocation with the lowest id within the Execution scope,
+    /// otherwise result is false.
+    Id OpGroupNonUniformElect(Id result_type, Id scope);
 
     /// Evaluates a predicate for all active invocations in the group, resulting in
     /// true if predicate evaluates to true for all active invocations in the
@@ -1235,6 +1331,18 @@ public:
     /// active and the Predicate for that invocation evaluated to true;
     /// otherwise, it is set to zero.
     Id OpGroupNonUniformBallot(Id result_type, Id scope, Id predicate);
+
+    /// Evaluates a value for all tangled invocations within the Execution scope,
+    /// resulting in true if the bit in Value for the corresponding invocation is set to 1,
+    /// otherwise the result is false.
+    Id OpGroupNonUniformInverseBallot(Id result_type, Id scope, Id value);
+
+    /// Result is the number of bits that are set to 1 in Value, considering only
+    /// the bits in Value required to represent all bits of the scope restricted tangle.
+    Id OpGroupNonUniformBallotBitCount(Id result_type, Id scope, spv::GroupOperation group_op, Id value);
+
+    /// Result is the Value of the invocation within the quad with a quad index equal to Index.
+    Id OpGroupNonUniformQuadBroadcast(Id result_type, Id scope, Id value, Id index);
 
     // Atomic
 
@@ -1320,6 +1428,20 @@ public:
     /// Perform the following steps atomically with respect to any other atomic accesses within
     /// Scope to the same location:
     /// 1) load through Pointer to get an Original Value,
+    /// 2) get a New Value by finding the largest 32bit float of Original Value and Value, and
+    /// 3) store the New Value back through Pointer.
+    Id OpAtomicFMax(Id result_type, Id pointer, Id memory, Id semantics, Id value);
+
+    /// Perform the following steps atomically with respect to any other atomic accesses within
+    /// Scope to the same location:
+    /// 1) load through Pointer to get an Original Value,
+    /// 2) get a New Value by finding the smallest 32bit float of Original Value and Value, and
+    /// 3) store the New Value back through Pointer.
+    Id OpAtomicFMin(Id result_type, Id pointer, Id memory, Id semantics, Id value);
+
+    /// Perform the following steps atomically with respect to any other atomic accesses within
+    /// Scope to the same location:
+    /// 1) load through Pointer to get an Original Value,
     /// 2) get a New Value by the bitwise AND of Original Value and Value, and
     /// 3) store the New Value back through Pointer.
     Id OpAtomicAnd(Id result_type, Id pointer, Id memory, Id semantics, Id value);
@@ -1338,8 +1460,63 @@ public:
     /// 3) store the New Value back through Pointer.
     Id OpAtomicXor(Id result_type, Id pointer, Id memory, Id semantics, Id value);
 
+    /// Print a message for vulkan layers to use, e.g. renderdoc
+    /// Usage is like C printf
+    Id OpDebugPrintf(Id fmt, std::span<const Id> fmt_args);
+
+    /// Returns a two-component floating point vector that represents the 2D texture coordinates
+    /// that would be used for accessing the selected cube map face for the given cube map texture
+    /// coordinates given as a parameter.
+    Id OpCubeFaceCoordAMD(Id result_type, Id cube_coords);
+
+    /// Returns a single floating point value that represents the index of the cube map face that
+    /// would be accessed by texture lookup functions for the cube map texture coordinates given
+    /// as parameter.
+    Id OpCubeFaceIndexAMD(Id result_type, Id cube_coords);
+
+    /// Returns a 64-bit value representing the current execution clock as seen by the shader
+    /// processor.
+    Id OpTimeAMD(Id result_type);
+
+    /// Result is the minimum of x, y, and z. Which operand is the result is undefined if one
+    /// of the operands is a NaN.
+    Id OpFMin3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the minimum of x, y, and z, interpreted as unsigned integers.
+    Id OpUMin3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the minimum of x, y, and z, interpreted as signed integers.
+    Id OpSMin3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the maximum of x, y, and z. Which operand is the result is undefined if one
+    /// of the operands is a NaN.
+    Id OpFMax3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the maximum of x, y, and z, interpreted as unsigned integers.
+    Id OpUMax3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the maximum of x, y, and z, interpreted as signed integers.
+    Id OpSMax3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the middle of x, y, and z. Which operand is the result is undefined if one
+    /// of the operands is a NaN.
+    Id OpFMid3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the middle of x, y, and z, interpreted as unsigned integers.
+    Id OpUMid3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Result is the middle of x, y, and z, interpreted as signed integers.
+    Id OpSMid3AMD(Id result_type, Id x, Id y, Id z);
+
+    /// Returns the value of the input <interpolant> without any interpolation, i.e. the raw output value of previous shader stage.
+    Id OpInterpolateAtVertexAMD(Id result_type, Id interpolant, Id vertex_index);
+
 private:
     Id GetGLSLstd450();
+    Id GetNonSemanticDebugPrintf();
+    Id GetAmdGcnShader();
+    Id GetAmdShaderTrinaryMinMax();
+    Id GetAmdExplicitVertexParameter();
 
     std::uint32_t version{};
     std::uint32_t bound{};
@@ -1347,6 +1524,10 @@ private:
     std::unordered_set<std::string> extensions;
     std::unordered_set<spv::Capability> capabilities;
     std::optional<Id> glsl_std_450;
+    std::optional<Id> non_semantic_debug_printf;
+    std::optional<Id> amd_gcn_shader;
+    std::optional<Id> amd_shader_trinary_minmax;
+    std::optional<Id> amd_explicit_vertex_parameter;
 
     spv::AddressingModel addressing_model{spv::AddressingModel::Logical};
     spv::MemoryModel memory_model{spv::MemoryModel::GLSL450};
@@ -1355,6 +1536,7 @@ private:
     std::unique_ptr<Stream> entry_points;
     std::unique_ptr<Stream> execution_modes;
     std::unique_ptr<Stream> debug;
+    std::unique_ptr<Stream> debug_name;
     std::unique_ptr<Stream> annotations;
     std::unique_ptr<Declarations> declarations;
     std::unique_ptr<Stream> global_variables;

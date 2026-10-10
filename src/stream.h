@@ -7,6 +7,7 @@
 #pragma once
 
 #include <bit>
+#include <span>
 #include <cassert>
 #include <concepts>
 #include <cstddef>
@@ -63,7 +64,7 @@ inline void InsertStringView(std::vector<u32>& words, size_t& insert_index,
 
 class Stream {
     friend Declarations;
-
+    static constexpr std::size_t GROW_STEP = 1024;
 public:
     explicit Stream(u32* bound_) : bound{bound_} {}
 
@@ -156,12 +157,19 @@ public:
     }
 
     Stream& operator<<(Id value) {
-        assert(value.value != 0);
+        if (value.value == 0) {
+            std::abort();
+        }
         return *this << value.value;
     }
 
     Stream& operator<<(const Literal& literal) {
         std::visit([this](auto value) { *this << value; }, literal);
+        return *this;
+    }
+
+    Stream& operator<<(const MemoryAccessLiteral& memory_access) {
+        std::visit([this](auto value) { *this << value; }, memory_access);
         return *this;
     }
 

@@ -18,8 +18,7 @@ Id Module::OpAtomicLoad(Id result_type, Id pointer, Id memory, Id semantics) {
 
 Id Module::OpAtomicStore(Id pointer, Id memory, Id semantics, Id value) {
     code->Reserve(5);
-    return *code << OpId{spv::Op::OpAtomicStore} << pointer << memory << semantics << value
-                 << EndOp{};
+    return *code << spv::Op::OpAtomicStore << pointer << memory << semantics << value << EndOp{};
 }
 
 Id Module::OpAtomicExchange(Id result_type, Id pointer, Id memory, Id semantics, Id value) {
@@ -80,6 +79,18 @@ Id Module::OpAtomicSMax(Id result_type, Id pointer, Id memory, Id semantics, Id 
 Id Module::OpAtomicUMax(Id result_type, Id pointer, Id memory, Id semantics, Id value) {
     code->Reserve(7);
     return *code << OpId{spv::Op::OpAtomicUMax, result_type} << pointer << memory << semantics
+                 << value << EndOp{};
+}
+
+Id Module::OpAtomicFMax(Id result_type, Id pointer, Id memory, Id semantics, Id value) {
+    code->Reserve(7);
+    return *code << OpId{spv::Op::OpAtomicFMaxEXT, result_type} << pointer << memory << semantics
+                 << value << EndOp{};
+}
+
+Id Module::OpAtomicFMin(Id result_type, Id pointer, Id memory, Id semantics, Id value) {
+    code->Reserve(7);
+    return *code << OpId{spv::Op::OpAtomicFMinEXT, result_type} << pointer << memory << semantics
                  << value << EndOp{};
 }
 
